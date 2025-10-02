@@ -11,11 +11,10 @@ st.set_page_config(
 )
 
 # --- Sistema de Autenticação SIMPLES ---
-# Usuários hardcoded iniciais
 default_users = {
-    "admin": "admin123",  # admin/admin123
-    "jose": "jose123",    # jose/jose123 - acesso a tudo
-    "user": "user123"     # user/user123 - acesso limitado
+    "admin": "admin123",
+    "jose": "jose123", 
+    "user": "user123"
 }
 
 def login():
@@ -28,14 +27,12 @@ def login():
         submit_button = st.form_submit_button("Entrar")
         
         if submit_button:
-            # Verifica usuários padrão
             if username in default_users and password == default_users[username]:
                 st.session_state.logged_in = True
                 st.session_state.user = username
                 st.session_state.user_role = "admin" if username == "admin" else "user"
                 st.success("Login realizado!")
                 st.rerun()
-            # Verifica usuários do banco
             elif "users_db" in st.session_state:
                 user_data = st.session_state.users_db.find_one({"username": username, "ativo": True})
                 if user_data and password == user_data["password"]:
@@ -49,7 +46,6 @@ def login():
             else:
                 st.error("Usuário ou senha incorretos!")
 
-# Verificar se o usuário está logado
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
 
@@ -57,7 +53,7 @@ if not st.session_state.logged_in:
     login()
     st.stop()
 
-# --- CONEXÃO MONGODB (APÓS LOGIN) ---
+# --- CONEXÃO MONGODB ---
 try:
     client = MongoClient("mongodb+srv://gustavoromao3345:RqWFPNOJQfInAW1N@cluster0.5iilj.mongodb.net/auto_doc?retryWrites=true&w=majority&ssl=true&ssl_cert_reqs=CERT_NONE&tlsAllowInvalidCertificates=true")
     db = client['projetos_app']
@@ -65,9 +61,7 @@ try:
     collection_comentarios = db['comentarios']
     collection_usuarios = db['usuarios']
     
-    # Salvar no session state para acesso fácil
     st.session_state.users_db = collection_usuarios
-    
     client.admin.command('ping')
     st.sidebar.success("✅ Conectado ao MongoDB")
     
@@ -76,16 +70,13 @@ except Exception as e:
     st.stop()
 
 # --- Funções para Usuários ---
-def criar_usuario(username, password, role, projetos_acesso=None):
+def criar_usuario(username, password, role):
     """Cria um novo usuário"""
-    if projetos_acesso is None:
-        projetos_acesso = []
-        
     usuario = {
         "username": username,
         "password": password,
         "role": role,
-        "projetos_acesso": projetos_acesso,
+        "projetos_acesso": [],
         "data_criacao": datetime.datetime.now(),
         "criado_por": st.session_state.user,
         "ativo": True
@@ -116,9 +107,33 @@ def desativar_usuario(username):
         {"$set": {"ativo": False, "data_desativacao": datetime.datetime.now()}}
     )
 
+def conceder_acesso_projeto(username, projeto_id):
+    """Concede acesso a um projeto para um usuário"""
+    user_data = obter_usuario(username)
+    if user_data:
+        projetos_atual = user_data.get("projetos_acesso", [])
+        projeto_id_str = str(projeto_id)
+        if projeto_id_str not in projetos_atual:
+            projetos_atual.append(projeto_id_str)
+            atualizar_usuario(username, {"projetos_acesso": projetos_atual})
+            return True
+    return False
+
+def revogar_acesso_projeto(username, projeto_id):
+    """Revoga acesso a um projeto de um usuário"""
+    user_data = obter_usuario(username)
+    if user_data:
+        projetos_atual = user_data.get("projetos_acesso", [])
+        projeto_id_str = str(projeto_id)
+        if projeto_id_str in projetos_atual:
+            projetos_atual.remove(projeto_id_str)
+            atualizar_usuario(username, {"projetos_acesso": projetos_atual})
+            return True
+    return False
+
 def usuario_tem_acesso(usuario, projeto_id):
     """Verifica se usuário tem acesso ao projeto"""
-    if usuario == "admin" or usuario == "jose":
+    if usuario in ["admin", "jose"]:
         return True
     
     user_data = obter_usuario(usuario)
@@ -129,22 +144,40 @@ def usuario_tem_acesso(usuario, projeto_id):
     if not user_data.get("projetos_acesso"):
         return True
     
-    # Verifica se o projeto_id está na lista de acesso
     projeto_id_str = str(projeto_id)
     return projeto_id_str in user_data["projetos_acesso"]
 
+def obter_projetos_usuario(username):
+    """Retorna todos os projetos que um usuário tem acesso"""
+    user_data = obter_usuario(username)
+    if not user_data or username in ["admin", "jose"]:
+        return listar_projetos_todos()
+    
+    projetos_acesso_ids = user_data.get("projetos_acesso", [])
+    projetos_com_acesso = []
+    
+    for projeto_id_str in projetos_acesso_ids:
+        try:
+            projeto = obter_projeto(ObjectId(projeto_id_str))
+            if projeto:
+                projetos_com_acesso.append(projeto)
+        except:
+            continue
+    
+    return projetos_com_acesso
+
 # --- Funções para Projetos ---
-def criar_projeto(nome, descricao, responsavel, prazo, usuarios_acesso=None):
-    """Cria um novo projeto no MongoDB"""
-    if usuarios_acesso is None:
-        usuarios_acesso = []
-        
+def listar_projetos_todos():
+    """Retorna TODOS os projetos (apenas para admin)"""
+    return list(collection_projetos.find({"ativo": True}).sort("data_criacao", -1))
+
+def criar_projeto(nome, descricao, responsavel, prazo):
+    """Cria um novo projeto"""
     projeto = {
         "nome": nome,
         "descricao": descricao,
         "responsavel": responsavel,
         "prazo": prazo,
-        "usuarios_acesso": usuarios_acesso,  # Lista de usuários com acesso
         "status": "Em andamento",
         "proxima_acao": "admin",
         "data_criacao": datetime.datetime.now(),
@@ -152,45 +185,19 @@ def criar_projeto(nome, descricao, responsavel, prazo, usuarios_acesso=None):
         "ativo": True
     }
     result = collection_projetos.insert_one(projeto)
-    
-    # Atualiza os usuários com acesso a este projeto
-    projeto_id_str = str(result.inserted_id)
-    for username in usuarios_acesso:
-        user_data = obter_usuario(username)
-        if user_data:
-            projetos_atual = user_data.get("projetos_acesso", [])
-            if projeto_id_str not in projetos_atual:
-                projetos_atual.append(projeto_id_str)
-                atualizar_usuario(username, {"projetos_acesso": projetos_atual})
-    
     return result.inserted_id
 
 def listar_projetos():
     """Retorna projetos que o usuário tem acesso"""
-    todos_projetos = list(collection_projetos.find({"ativo": True}).sort("data_criacao", -1))
-    
-    # Admin e Jose veem tudo
     if st.session_state.user in ["admin", "jose"]:
-        return todos_projetos
-    
-    # Outros usuários veem apenas projetos com acesso
-    projetos_com_acesso = []
-    for projeto in todos_projetos:
-        if usuario_tem_acesso(st.session_state.user, projeto['_id']):
-            projetos_com_acesso.append(projeto)
-    
-    return projetos_com_acesso
+        return listar_projetos_todos()
+    return obter_projetos_usuario(st.session_state.user)
 
 def obter_projeto(projeto_id):
-    """Obtém um projeto específico pelo ID"""
+    """Obtém um projeto específico"""
     if isinstance(projeto_id, str):
         projeto_id = ObjectId(projeto_id)
-    projeto = collection_projetos.find_one({"_id": projeto_id})
-    
-    # Verifica acesso
-    if projeto and usuario_tem_acesso(st.session_state.user, projeto_id):
-        return projeto
-    return None
+    return collection_projetos.find_one({"_id": projeto_id, "ativo": True})
 
 def atualizar_projeto(projeto_id, dados_atualizacao):
     """Atualiza um projeto existente"""
@@ -203,7 +210,7 @@ def atualizar_projeto(projeto_id, dados_atualizacao):
     )
 
 def alternar_proxima_acao(projeto_id):
-    """Alterna entre admin e user para próxima ação"""
+    """Alterna a próxima ação"""
     projeto = obter_projeto(projeto_id)
     if projeto:
         nova_acao = "user" if projeto["proxima_acao"] == "admin" else "admin"
@@ -234,7 +241,6 @@ def adicionar_comentario(projeto_id, texto, autor):
     }
     result = collection_comentarios.insert_one(comentario)
     
-    # Atualiza a próxima ação após comentário do user
     if autor != "admin":
         alternar_proxima_acao(projeto_id)
     
@@ -252,7 +258,6 @@ def obter_comentarios(projeto_id):
 st.sidebar.title(f"👋 {st.session_state.user}")
 st.sidebar.write(f"**Tipo:** {st.session_state.user_role}")
 
-# Botão de logout
 if st.sidebar.button("🚪 Sair"):
     for key in ["logged_in", "user", "user_role"]:
         if key in st.session_state:
@@ -263,17 +268,15 @@ st.title("📊 Sistema de Acompanhamento de Projetos")
 
 # Menu de abas
 if st.session_state.user == "admin":
-    tab_projetos, tab_criar, tab_usuarios, tab_dashboard = st.tabs([
+    tab_projetos, tab_criar, tab_usuarios, tab_permissoes, tab_dashboard = st.tabs([
         "📋 Projetos", 
         "➕ Criar Projeto", 
-        "👥 Gerenciar Usuários",
+        "👥 Usuários",
+        "🔐 Gerenciar Acessos", 
         "📈 Dashboard"
     ])
 else:
-    tab_projetos, tab_dashboard = st.tabs([
-        "📋 Projetos", 
-        "📈 Dashboard"
-    ])
+    tab_projetos, tab_dashboard = st.tabs(["📋 Projetos", "📈 Dashboard"])
 
 with tab_projetos:
     st.header("📋 Lista de Projetos")
@@ -290,18 +293,12 @@ with tab_projetos:
                     st.write(f"**Prazo:** {projeto['prazo'].strftime('%d/%m/%Y')}")
                     st.write(f"**Criado por:** {projeto['criado_por']}")
                     
-                    # Mostrar usuários com acesso
-                    if projeto.get('usuarios_acesso'):
-                        st.write(f"**Acesso permitido para:** {', '.join(projeto['usuarios_acesso'])}")
-                    
-                    # Indicador de próxima ação
                     if projeto['proxima_acao'] == st.session_state.user:
                         st.success(f"✅ Sua vez de agir!")
                     else:
                         st.warning(f"⏳ Aguardando {projeto['proxima_acao']}")
                 
                 with col2:
-                    # Botões de ação para admin
                     if st.session_state.user == "admin":
                         if st.button("📝 Editar", key=f"edit_{projeto['_id']}"):
                             st.session_state.editar_projeto = projeto['_id']
@@ -312,7 +309,6 @@ with tab_projetos:
                             st.success("Projeto excluído!")
                             st.rerun()
                     
-                    # Área de comentários
                     st.subheader("💬 Comentários")
                     
                     comentarios = obter_comentarios(projeto['_id'])
@@ -324,7 +320,6 @@ with tab_projetos:
                     else:
                         st.info("Nenhum comentário ainda.")
                     
-                    # Formulário para novo comentário
                     with st.form(key=f"comentario_form_{projeto['_id']}"):
                         novo_comentario = st.text_area("Novo comentário:", key=f"comentario_{projeto['_id']}")
                         enviar_comentario = st.form_submit_button("Enviar Comentário")
@@ -334,23 +329,14 @@ with tab_projetos:
                             st.success("Comentário adicionado!")
                             st.rerun()
                 
-                # Edição de projeto
                 if st.session_state.get('editar_projeto') == projeto['_id']:
                     st.subheader("✏️ Editar Projeto")
-                    
-                    # Buscar usuários disponíveis para seleção
-                    usuarios_disponiveis = [u["username"] for u in listar_usuarios()]
                     
                     with st.form(key=f"editar_form_{projeto['_id']}"):
                         novo_nome = st.text_input("Nome:", value=projeto['nome'])
                         nova_descricao = st.text_area("Descrição:", value=projeto['descricao'])
                         novo_responsavel = st.text_input("Responsável:", value=projeto['responsavel'])
                         novo_prazo = st.date_input("Prazo:", value=projeto['prazo'])
-                        usuarios_acesso = st.multiselect(
-                            "Usuários com acesso:",
-                            options=usuarios_disponiveis,
-                            default=projeto.get('usuarios_acesso', [])
-                        )
                         novo_status = st.selectbox(
                             "Status:", 
                             ["Em andamento", "Concluído", "Pausado", "Cancelado"],
@@ -365,7 +351,6 @@ with tab_projetos:
                                     "descricao": nova_descricao,
                                     "responsavel": novo_responsavel,
                                     "prazo": datetime.datetime.combine(novo_prazo, datetime.datetime.min.time()),
-                                    "usuarios_acesso": usuarios_acesso,
                                     "status": novo_status
                                 })
                                 del st.session_state.editar_projeto
@@ -377,26 +362,17 @@ with tab_projetos:
                                 del st.session_state.editar_projeto
                                 st.rerun()
     else:
-        st.info("Nenhum projeto disponível ou você não tem acesso a nenhum projeto.")
+        st.info("Nenhum projeto disponível.")
 
-# Aba de criação de projetos (apenas para admin)
 if st.session_state.user == "admin":
     with tab_criar:
         st.header("➕ Criar Novo Projeto")
-        
-        # Buscar usuários disponíveis para seleção
-        usuarios_disponiveis = [u["username"] for u in listar_usuarios()]
         
         with st.form("form_criar_projeto"):
             nome_projeto = st.text_input("Nome do Projeto:*")
             descricao_projeto = st.text_area("Descrição:*", height=100)
             responsavel_projeto = st.text_input("Responsável:*")
             prazo_projeto = st.date_input("Prazo:*", min_value=datetime.date.today())
-            usuarios_acesso = st.multiselect(
-                "Usuários com acesso ao projeto:",
-                options=usuarios_disponiveis,
-                help="Selecione quais usuários podem ver e comentar neste projeto"
-            )
             
             submitted = st.form_submit_button("Criar Projeto")
             if submitted:
@@ -405,13 +381,12 @@ if st.session_state.user == "admin":
                         nome_projeto, 
                         descricao_projeto, 
                         responsavel_projeto, 
-                        datetime.datetime.combine(prazo_projeto, datetime.datetime.min.time()),
-                        usuarios_acesso
+                        datetime.datetime.combine(prazo_projeto, datetime.datetime.min.time())
                     )
                     st.success(f"Projeto '{nome_projeto}' criado!")
                     st.balloons()
                 else:
-                    st.error("Preencha todos os campos obrigatórios!")
+                    st.error("Preencha todos os campos!")
 
     with tab_usuarios:
         st.header("👥 Gerenciar Usuários")
@@ -422,6 +397,8 @@ if st.session_state.user == "admin":
             st.subheader("Usuários do Sistema")
             
             usuarios = listar_usuarios()
+            usuarios_padrao = ["admin", "jose", "user"]
+            
             if usuarios:
                 for usuario in usuarios:
                     with st.expander(f"👤 {usuario['username']} - {usuario['role']}", expanded=False):
@@ -432,21 +409,21 @@ if st.session_state.user == "admin":
                             st.write(f"**Criado por:** {usuario['criado_por']}")
                             st.write(f"**Data criação:** {usuario['data_criacao'].strftime('%d/%m/%Y %H:%M')}")
                             
-                            if usuario.get('projetos_acesso'):
-                                st.write(f"**Acesso a projetos:** {len(usuario['projetos_acesso'])} projeto(s)")
-                            else:
-                                st.write("**Acesso:** Todos os projetos")
+                            projetos_acesso = obter_projetos_usuario(usuario['username'])
+                            st.write(f"**Tem acesso a:** {len(projetos_acesso)} projeto(s)")
                         
                         with col2:
-                            if st.button("🗑️ Excluir", key=f"del_user_{usuario['username']}"):
-                                if usuario['username'] not in ['admin', 'jose', 'user']:
+                            if usuario['username'] not in usuarios_padrao:
+                                if st.button("🗑️ Excluir", key=f"del_user_{usuario['username']}"):
                                     desativar_usuario(usuario['username'])
                                     st.success(f"Usuário {usuario['username']} excluído!")
                                     st.rerun()
-                                else:
-                                    st.error("Não é possível excluir usuários padrão!")
-            else:
-                st.info("Nenhum usuário cadastrado além dos padrões.")
+                            else:
+                                st.info("Usuário padrão")
+            
+            st.subheader("Usuários Padrão do Sistema")
+            for user_padrao in usuarios_padrao:
+                st.write(f"👤 **{user_padrao}** - Senha: {default_users[user_padrao]}")
         
         with sub_tab2:
             st.subheader("Criar Novo Usuário")
@@ -459,7 +436,7 @@ if st.session_state.user == "admin":
                 submitted = st.form_submit_button("Criar Usuário")
                 if submitted:
                     if novo_username and nova_senha:
-                        if obter_usuario(novo_username):
+                        if obter_usuario(novo_username) or novo_username in default_users:
                             st.error("Usuário já existe!")
                         else:
                             criar_usuario(novo_username, nova_senha, tipo_usuario)
@@ -468,12 +445,106 @@ if st.session_state.user == "admin":
                     else:
                         st.error("Preencha todos os campos!")
 
+    with tab_permissoes:
+        st.header("🔐 Gerenciar Acessos aos Projetos")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.subheader("📋 Todos os Projetos")
+            projetos = listar_projetos_todos()
+            
+            if projetos:
+                projeto_selecionado = st.selectbox(
+                    "Selecione um projeto:",
+                    options=[p["nome"] for p in projetos],
+                    key="projeto_permissoes"
+                )
+                
+                if projeto_selecionado:
+                    projeto = next(p for p in projetos if p["nome"] == projeto_selecionado)
+                    st.write(f"**Descrição:** {projeto['descricao']}")
+                    st.write(f"**Status:** {projeto['status']}")
+                    
+                    # Mostrar quem tem acesso atualmente
+                    st.subheader("👥 Usuários com Acesso")
+                    usuarios_com_acesso = []
+                    todos_usuarios = listar_usuarios() + [{"username": "jose"}, {"username": "user"}]
+                    
+                    for usuario in todos_usuarios:
+                        username = usuario["username"]
+                        if usuario_tem_acesso(username, projeto['_id']):
+                            usuarios_com_acesso.append(username)
+                    
+                    if usuarios_com_acesso:
+                        for username in usuarios_com_acesso:
+                            st.write(f"✅ {username}")
+                    else:
+                        st.info("Nenhum usuário com acesso específico")
+        
+        with col2:
+            st.subheader("👤 Conceder/Revogar Acesso")
+            
+            if projetos and projeto_selecionado:
+                projeto = next(p for p in projetos if p["nome"] == projeto_selecionado)
+                
+                # Lista de usuários disponíveis (excluindo admin e jose que têm acesso total)
+                usuarios_disponiveis = [u["username"] for u in listar_usuarios() if u["username"] not in ["admin", "jose"]]
+                usuarios_disponiveis.extend(["user"])  # Adiciona o user padrão
+                
+                usuario_selecionado = st.selectbox(
+                    "Selecione um usuário:",
+                    options=usuarios_disponiveis,
+                    key="usuario_permissoes"
+                )
+                
+                if usuario_selecionado:
+                    tem_acesso = usuario_tem_acesso(usuario_selecionado, projeto['_id'])
+                    
+                    if tem_acesso:
+                        st.warning(f"❌ {usuario_selecionado} já tem acesso a este projeto")
+                        if st.button("Revogar Acesso", type="primary"):
+                            if revogar_acesso_projeto(usuario_selecionado, projeto['_id']):
+                                st.success(f"Acesso revogado para {usuario_selecionado}!")
+                                st.rerun()
+                            else:
+                                st.error("Erro ao revogar acesso")
+                    else:
+                        st.success(f"✅ {usuario_selecionado} pode receber acesso")
+                        if st.button("Conceder Acesso", type="primary"):
+                            if conceder_acesso_projeto(usuario_selecionado, projeto['_id']):
+                                st.success(f"Acesso concedido para {usuario_selecionado}!")
+                                st.rerun()
+                            else:
+                                st.error("Erro ao conceder acesso")
+                
+                # Acesso em massa
+                st.subheader("🎯 Acesso Rápido")
+                usuarios_para_acesso = st.multiselect(
+                    "Selecionar múltiplos usuários:",
+                    options=usuarios_disponiveis
+                )
+                
+                col_a, col_b = st.columns(2)
+                with col_a:
+                    if st.button("✅ Conceder a Todos") and usuarios_para_acesso:
+                        for username in usuarios_para_acesso:
+                            conceder_acesso_projeto(username, projeto['_id'])
+                        st.success(f"Acesso concedido para {len(usuarios_para_acesso)} usuários!")
+                        st.rerun()
+                
+                with col_b:
+                    if st.button("❌ Revogar de Todos") and usuarios_para_acesso:
+                        for username in usuarios_para_acesso:
+                            revogar_acesso_projeto(username, projeto['_id'])
+                        st.success(f"Acesso revogado de {len(usuarios_para_acesso)} usuários!")
+                        st.rerun()
+
 with tab_dashboard:
     st.header("📈 Dashboard de Projetos")
     
     projetos = listar_projetos()
     if projetos:
-        # Métricas principais
         col1, col2, col3, col4 = st.columns(4)
         
         total_projetos = len(projetos)
@@ -490,7 +561,6 @@ with tab_dashboard:
         with col4:
             st.metric("Minha Vez", minha_vez)
         
-        # Gráfico de status
         st.subheader("📊 Distribuição por Status")
         status_counts = {}
         for projeto in projetos:
@@ -500,7 +570,6 @@ with tab_dashboard:
         for status, count in status_counts.items():
             st.write(f"**{status}:** {count} projeto(s)")
         
-        # Projetos que exigem atenção
         st.subheader("🎯 Projetos que Precisam de Sua Atenção")
         projetos_minha_vez = [p for p in projetos if p['proxima_acao'] == st.session_state.user]
         
@@ -514,7 +583,6 @@ with tab_dashboard:
     else:
         st.info("Nenhum projeto para exibir no dashboard.")
 
-# --- Estilização ---
 st.markdown("""
 <style>
     .stExpander {
