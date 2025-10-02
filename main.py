@@ -51,11 +51,21 @@ if not st.session_state.logged_in:
     login()
     st.stop()
 
-# --- CONEXÃO MONGODB ---
-client = MongoClient("mongodb+srv://gustavoromao3345:RqWFPNOJQfInAW1N@cluster0.5iilj.mongodb.net/auto_doc?retryWrites=true&w=majority&ssl=true&ssl_cert_reqs=CERT_NONE&tlsAllowInvalidCertificates=true")
-db = client['projetos_app']
-collection_projetos = db['projetos']
-collection_comentarios = db['comentarios']
+# --- CONEXÃO MONGODB (APÓS LOGIN) ---
+# Só conecta ao MongoDB depois que o usuário fez login
+try:
+    client = MongoClient("mongodb+srv://gustavoromao3345:RqWFPNOJQfInAW1N@cluster0.5iilj.mongodb.net/auto_doc?retryWrites=true&w=majority&ssl=true&ssl_cert_reqs=CERT_NONE&tlsAllowInvalidCertificates=true")
+    db = client['projetos_app']
+    collection_projetos = db['projetos']
+    collection_comentarios = db['comentarios']
+    
+    # Testar conexão
+    client.admin.command('ping')
+    st.sidebar.success("✅ Conectado ao MongoDB")
+    
+except Exception as e:
+    st.error(f"❌ Erro na conexão com MongoDB: {e}")
+    st.stop()
 
 # --- Funções para Projetos ---
 def criar_projeto(nome, descricao, responsavel, prazo):
